@@ -7,6 +7,36 @@ enriches with taxi zone names, and writes to lakehouse.taxi.silver.
 import time
 from pyspark.sql import SparkSession
 import pyspark.sql.functions as F
+from pyspark.sql.types import (
+    StructType, StructField,
+    LongType, DoubleType, StringType,
+)
+
+# ---------------------------------------------------------------------------
+# Schema — used to parse raw JSON stored in bronze
+# ---------------------------------------------------------------------------
+TAXI_SCHEMA = StructType([
+    StructField("VendorID",               LongType(),   True),
+    StructField("tpep_pickup_datetime",   LongType(),   True),
+    StructField("tpep_dropoff_datetime",  LongType(),   True),
+    StructField("passenger_count",        DoubleType(), True),
+    StructField("trip_distance",          DoubleType(), True),
+    StructField("RatecodeID",             DoubleType(), True),
+    StructField("store_and_fwd_flag",     StringType(), True),
+    StructField("PULocationID",           LongType(),   True),
+    StructField("DOLocationID",           LongType(),   True),
+    StructField("payment_type",           LongType(),   True),
+    StructField("fare_amount",            DoubleType(), True),
+    StructField("extra",                  DoubleType(), True),
+    StructField("mta_tax",                DoubleType(), True),
+    StructField("tip_amount",             DoubleType(), True),
+    StructField("tolls_amount",           DoubleType(), True),
+    StructField("improvement_surcharge",  DoubleType(), True),
+    StructField("total_amount",           DoubleType(), True),
+    StructField("congestion_surcharge",   DoubleType(), True),
+    StructField("Airport_fee",            DoubleType(), True),
+    StructField("cbd_congestion_fee",     DoubleType(), True),
+])
 
 # ---------------------------------------------------------------------------
 # Config
@@ -14,7 +44,7 @@ import pyspark.sql.functions as F
 BRONZE_TABLE = "lakehouse.taxi.bronze"
 SILVER_TABLE = "lakehouse.taxi.silver"
 CHECKPOINT_DIR = "./checkpoints/silver"
-ZONE_LOOKUP_PATH = "data/lookup/taxi_zone_lookup.parquet"
+ZONE_LOOKUP_PATH = "data/taxi_zone_lookup.parquet"
 
 DEDUP_KEY = [
     "tpep_pickup_datetime",
@@ -110,8 +140,13 @@ def process_batch(batch_df, batch_id):
 
     print(f"\n  Batch {batch_id}: {count_before:,} rows from bronze")
 
-    # --- Cast columns ---
+    # --- Parse raw JSON into typed columns ---
     df = batch_df.select(
+        F.from_json(F.col("raw_json"), TAXI_SCHEMA).alias("data")
+    ).select("data.*")
+
+    # --- Cast columns ---
+    df = df.select(
         F.col("tpep_pickup_datetime").cast("timestamp").alias("tpep_pickup_datetime"),
         F.col("tpep_dropoff_datetime").cast("timestamp").alias("tpep_dropoff_datetime"),
         F.col("passenger_count").cast("int").alias("passenger_count"),
@@ -194,14 +229,11 @@ query = (
     bronze_stream.writeStream
     .foreachBatch(process_batch)
     .option("checkpointLocation", CHECKPOINT_DIR)
-    .trigger(processingTime="30 seconds")
+    .trigger(availableNow=True)
     .start()
 )
 
-print("Streaming query started. Waiting for data ...")
-print("(Stop with Ctrl-C or query.stop())\n")
-print("After ingestion you can run:")
-print(f"  SELECT count(*) FROM {SILVER_TABLE};")
-print(f"  SELECT * FROM {SILVER_TABLE} LIMIT 5;")
+print("Streaming query started. Processing all available bronze rows ...")
 
 query.awaitTermination()
+print("Silver ingestion complete.")

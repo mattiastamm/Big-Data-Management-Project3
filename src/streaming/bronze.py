@@ -1,16 +1,12 @@
 """
 streaming/bronze.py — Spark Structured Streaming job.
 Reads raw JSON messages from Kafka topic 'taxi-trips' and appends
-every field as-is to the Iceberg table lakehouse.taxi.bronze.
-No transformations. Bronze is intentionally raw.
+the unparsed JSON string to the Iceberg table lakehouse.taxi.bronze.
+No schema parsing. Bronze is an immutable raw landing zone.
 """
 
 from pyspark.sql import SparkSession
 import pyspark.sql.functions as F
-from pyspark.sql.types import (
-    StructType, StructField,
-    LongType, DoubleType, StringType,
-)
 
 # ---------------------------------------------------------------------------
 # Config
@@ -19,32 +15,6 @@ KAFKA_BOOTSTRAP   = "kafka:29092"
 KAFKA_TOPIC       = "taxi-trips"
 CHECKPOINT_DIR    = "./checkpoints/bronze"
 TABLE             = "lakehouse.taxi.bronze"
-
-# ---------------------------------------------------------------------------
-# Schema — matches the JSON produced by produce.py
-# ---------------------------------------------------------------------------
-TAXI_SCHEMA = StructType([
-    StructField("VendorID",               LongType(),   True),
-    StructField("tpep_pickup_datetime",   LongType(),   True),
-    StructField("tpep_dropoff_datetime",  LongType(),   True),
-    StructField("passenger_count",        DoubleType(), True),
-    StructField("trip_distance",          DoubleType(), True),
-    StructField("RatecodeID",             DoubleType(), True),
-    StructField("store_and_fwd_flag",     StringType(), True),
-    StructField("PULocationID",           LongType(),   True),
-    StructField("DOLocationID",           LongType(),   True),
-    StructField("payment_type",           LongType(),   True),
-    StructField("fare_amount",            DoubleType(), True),
-    StructField("extra",                  DoubleType(), True),
-    StructField("mta_tax",                DoubleType(), True),
-    StructField("tip_amount",             DoubleType(), True),
-    StructField("tolls_amount",           DoubleType(), True),
-    StructField("improvement_surcharge",  DoubleType(), True),
-    StructField("total_amount",           DoubleType(), True),
-    StructField("congestion_surcharge",   DoubleType(), True),
-    StructField("Airport_fee",            DoubleType(), True),
-    StructField("cbd_congestion_fee",     DoubleType(), True),
-])
 
 # ---------------------------------------------------------------------------
 # SparkSession — all config comes from spark-defaults.conf
@@ -63,26 +33,8 @@ spark.sql("CREATE DATABASE IF NOT EXISTS lakehouse.taxi")
 print(f"Creating table {TABLE} (if not exists) ...")
 spark.sql(f"""
     CREATE TABLE IF NOT EXISTS {TABLE} (
-        VendorID               BIGINT,
-        tpep_pickup_datetime   BIGINT,
-        tpep_dropoff_datetime  BIGINT,
-        passenger_count        DOUBLE,
-        trip_distance          DOUBLE,
-        RatecodeID             DOUBLE,
-        store_and_fwd_flag     STRING,
-        PULocationID           BIGINT,
-        DOLocationID           BIGINT,
-        payment_type           BIGINT,
-        fare_amount            DOUBLE,
-        extra                  DOUBLE,
-        mta_tax                DOUBLE,
-        tip_amount             DOUBLE,
-        tolls_amount           DOUBLE,
-        improvement_surcharge  DOUBLE,
-        total_amount           DOUBLE,
-        congestion_surcharge   DOUBLE,
-        Airport_fee            DOUBLE,
-        cbd_congestion_fee     DOUBLE
+        raw_json     STRING,
+        ingested_at  TIMESTAMP
     )
     USING iceberg
 """)
@@ -102,13 +54,14 @@ raw_stream = (
 )
 
 # ---------------------------------------------------------------------------
-# Parse JSON payload
+# Extract raw JSON string — no parsing, no schema enforcement
 # ---------------------------------------------------------------------------
-parsed_stream = (
+raw_json_stream = (
     raw_stream
-    .select(F.col("value").cast("string").alias("json_str"))
-    .select(F.from_json(F.col("json_str"), TAXI_SCHEMA).alias("data"))
-    .select("data.*")
+    .select(
+        F.col("value").cast("string").alias("raw_json"),
+        F.current_timestamp().alias("ingested_at"),
+    )
 )
 
 # ---------------------------------------------------------------------------
@@ -124,10 +77,10 @@ print(f"Starting streaming query -> {TABLE}")
 print(f"Checkpoint directory: {CHECKPOINT_DIR}")
 
 query = (
-    parsed_stream.writeStream
+    raw_json_stream.writeStream
     .foreachBatch(write_batch)
     .option("checkpointLocation", CHECKPOINT_DIR)
-    .trigger(processingTime="10 seconds")
+    .trigger(availableNow=True)
     .start()
 )
 

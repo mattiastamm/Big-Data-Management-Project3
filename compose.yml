@@ -134,6 +134,7 @@ services:
   airflow:
     image: apache/airflow:2.10.5-python3.11
     container_name: airflow
+    user: "0"                          # root — needed for Docker socket access
     depends_on:
       kafka:
         condition: service_healthy
@@ -160,8 +161,10 @@ services:
     volumes:
       - ./dags:/opt/airflow/dags
       - airflow-data:/opt/airflow
+      - /var/run/docker.sock:/var/run/docker.sock   # Docker socket for exec into jupyter
     entrypoint: >
       /bin/bash -c "
+        pip install --quiet requests psycopg2-binary docker;
         airflow db migrate;
         airflow users create
           --username ${AIRFLOW_USER:-admin}
