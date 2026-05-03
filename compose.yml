@@ -150,6 +150,7 @@ services:
       - AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
       - AIRFLOW__WEBSERVER__EXPOSE_CONFIG=True
+      - AIRFLOW_HOME=/opt/airflow
       # Pass connection info so DAGs can reach other services
       - KAFKA_BOOTSTRAP=kafka:9092
       - CONNECT_URL=http://connect:8083
@@ -165,14 +166,9 @@ services:
     entrypoint: >
       /bin/bash -c "
         pip install --quiet requests psycopg2-binary docker;
+        mkdir -p /opt/airflow;
+        echo '${AIRFLOW_PASSWORD:-admin}' > /opt/airflow/standalone_admin_password.txt;
         airflow db migrate;
-        airflow users create
-          --username ${AIRFLOW_USER:-admin}
-          --password ${AIRFLOW_PASSWORD:-admin}
-          --firstname Admin
-          --lastname User
-          --role Admin
-          --email admin@example.com 2>/dev/null || true;
         exec airflow standalone
       "
     healthcheck:

@@ -69,6 +69,10 @@ CONNECTOR_CONFIG: dict[str, Any] = {
     "key.converter.schemas.enable":   "true",
     "value.converter.schemas.enable": "true",
     "tombstones.on.delete":        "true",   # emit tombstone after delete event
+    # Emit Postgres NUMERIC/DECIMAL as IEEE-754 doubles instead of the default
+    # base64-encoded bytes (which would force every consumer to know the scale
+    # and decode manually).
+    "decimal.handling.mode":       "double",
 }
 
 # ---------------------------------------------------------------------------
@@ -151,9 +155,16 @@ def _exec_in_jupyter(script_path: str) -> None:
 
     client    = docker.from_env()
     container = client.containers.get("jupyter")
-    cmd       = f"python /home/jovyan/project/{script_path}"
 
-    print(f"Running in jupyter container: {cmd}")
+    # spark-submit handles PYTHONPATH (PySpark lives inside the Spark distro,
+    # not as a pip package) and loads our Iceberg/S3 defaults via --properties-file.
+    spark_submit  = "/usr/local/spark/bin/spark-submit"
+    spark_conf    = "/home/jovyan/project/conf/spark-defaults.conf"
+    script_full   = f"/home/jovyan/project/{script_path}"
+    bash_cmd      = f"{spark_submit} --properties-file {spark_conf} {script_full}"
+    cmd           = ["bash", "-c", bash_cmd]
+
+    print(f"Running in jupyter container: {bash_cmd}")
 
     # exec_create + exec_start gives us streaming output
     exec_id = client.api.exec_create(
@@ -179,6 +190,51 @@ def run_silver_cdc(**_)   -> None: _exec_in_jupyter("src/cdc/silver_cdc.py")
 def run_silver_taxi(**_)  -> None: _exec_in_jupyter("src/streaming/silver.py")
 def run_gold_taxi(**_)    -> None: _exec_in_jupyter("src/streaming/gold.py")
 def run_validation(**_)   -> None: _exec_in_jupyter("src/cdc/validate.py")
+
+
+def snapshot_pg(**context) -> dict:
+    """
+    Query PostgreSQL immediately after silver_cdc completes and XCom-push a
+    point-in-time snapshot of the CDC table IDs.
+
+    Writing to the dags/ directory makes the snapshot reachable from both:
+      - Airflow container : /opt/airflow/dags/pg_snapshot.json
+      - Jupyter container : /home/jovyan/project/dags/pg_snapshot.json
+    validate.py reads that file so it compares silver against *this* snapshot
+    rather than live Postgres (which simulate.py keeps mutating).
+    """
+    import json
+    import psycopg2
+
+    conn = psycopg2.connect(
+        host=PG_HOST, port=PG_PORT, dbname=PG_DB,
+        user=PG_USER, password=PG_PASSWORD,
+    )
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM customers ORDER BY id")
+    customer_ids = [r[0] for r in cur.fetchall()]
+    cur.execute("SELECT id FROM drivers ORDER BY id")
+    driver_ids = [r[0] for r in cur.fetchall()]
+    conn.close()
+
+    snapshot = {
+        "taken_at":     context["ts"],
+        "customer_ids": customer_ids,
+        "driver_ids":   driver_ids,
+    }
+
+    path = "/opt/airflow/dags/pg_snapshot.json"
+    with open(path, "w") as fh:
+        json.dump(snapshot, fh)
+
+    print(
+        f"Snapshot written to {path}: "
+        f"{len(customer_ids)} customers, {len(driver_ids)} drivers"
+    )
+
+    # XCom-push so other tasks can read via ti.xcom_pull if needed
+    context["ti"].xcom_push(key="pg_snapshot", value=snapshot)
+    return snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +294,18 @@ with DAG(
         sla=timedelta(minutes=18),
     )
 
+    t_snapshot_pg = PythonOperator(
+        task_id="snapshot_pg",
+        python_callable=snapshot_pg,
+        sla=timedelta(minutes=20),
+        doc_md=(
+            "Takes a point-in-time snapshot of PostgreSQL CDC table IDs "
+            "immediately after silver_cdc finishes and writes it to "
+            "dags/pg_snapshot.json for validate.py to consume. "
+            "XCom key: 'pg_snapshot'."
+        ),
+    )
+
     t_gold_taxi = PythonOperator(
         task_id="gold_taxi",
         python_callable=run_gold_taxi,
@@ -248,17 +316,18 @@ with DAG(
         task_id="validation",
         python_callable=run_validation,
         sla=timedelta(minutes=28),
-        # Keep going for taxi tasks even if CDC validation fails
         trigger_rule=TriggerRule.ALL_SUCCESS,
     )
 
     # ── Dependency graph ────────────────────────────────────────────────────
     #
-    #   health_check
-    #       ├── bronze_cdc  ──► silver_cdc ──┐
-    #       └── bronze_taxi ──► silver_taxi ──┴──► gold_taxi ──► validation
+    #   health_check ──► snapshot_pg ──► bronze_cdc  ──► silver_cdc ──┐
+    #                                └── bronze_taxi ──► silver_taxi ──┴──► gold_taxi ──► validation
     #
-    t_health_check >> [t_bronze_cdc, t_bronze_taxi]
+    # snapshot_pg runs first so the Postgres state it captures pre-dates
+    # bronze_cdc's Kafka read: any row deleted before the snapshot already
+    # has its delete event in Kafka and will be processed by silver_cdc.
+    t_health_check >> t_snapshot_pg >> [t_bronze_cdc, t_bronze_taxi]
     t_bronze_cdc   >> t_silver_cdc
     t_bronze_taxi  >> t_silver_taxi
     [t_silver_cdc, t_silver_taxi] >> t_gold_taxi

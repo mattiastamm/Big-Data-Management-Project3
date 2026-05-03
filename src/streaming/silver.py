@@ -9,33 +9,36 @@ from pyspark.sql import SparkSession
 import pyspark.sql.functions as F
 from pyspark.sql.types import (
     StructType, StructField,
-    LongType, DoubleType, StringType,
+    LongType, DoubleType, StringType, TimestampType,
 )
 
 # ---------------------------------------------------------------------------
-# Schema — used to parse raw JSON stored in bronze
+# Schema — used to parse raw JSON stored in bronze.
+# produce.py serialises pd.Timestamp via .isoformat() → ISO-8601 strings, so
+# datetime columns must be TimestampType (not LongType) so from_json can parse
+# them.  All numeric fields that may be absent use DoubleType (nullable).
 # ---------------------------------------------------------------------------
 TAXI_SCHEMA = StructType([
-    StructField("VendorID",               LongType(),   True),
-    StructField("tpep_pickup_datetime",   LongType(),   True),
-    StructField("tpep_dropoff_datetime",  LongType(),   True),
-    StructField("passenger_count",        DoubleType(), True),
-    StructField("trip_distance",          DoubleType(), True),
-    StructField("RatecodeID",             DoubleType(), True),
-    StructField("store_and_fwd_flag",     StringType(), True),
-    StructField("PULocationID",           LongType(),   True),
-    StructField("DOLocationID",           LongType(),   True),
-    StructField("payment_type",           LongType(),   True),
-    StructField("fare_amount",            DoubleType(), True),
-    StructField("extra",                  DoubleType(), True),
-    StructField("mta_tax",                DoubleType(), True),
-    StructField("tip_amount",             DoubleType(), True),
-    StructField("tolls_amount",           DoubleType(), True),
-    StructField("improvement_surcharge",  DoubleType(), True),
-    StructField("total_amount",           DoubleType(), True),
-    StructField("congestion_surcharge",   DoubleType(), True),
-    StructField("Airport_fee",            DoubleType(), True),
-    StructField("cbd_congestion_fee",     DoubleType(), True),
+    StructField("VendorID",               LongType(),      True),
+    StructField("tpep_pickup_datetime",   TimestampType(), True),
+    StructField("tpep_dropoff_datetime",  TimestampType(), True),
+    StructField("passenger_count",        DoubleType(),    True),
+    StructField("trip_distance",          DoubleType(),    True),
+    StructField("RatecodeID",             DoubleType(),    True),
+    StructField("store_and_fwd_flag",     StringType(),    True),
+    StructField("PULocationID",           LongType(),      True),
+    StructField("DOLocationID",           LongType(),      True),
+    StructField("payment_type",           LongType(),      True),
+    StructField("fare_amount",            DoubleType(),    True),
+    StructField("extra",                  DoubleType(),    True),
+    StructField("mta_tax",                DoubleType(),    True),
+    StructField("tip_amount",             DoubleType(),    True),
+    StructField("tolls_amount",           DoubleType(),    True),
+    StructField("improvement_surcharge",  DoubleType(),    True),
+    StructField("total_amount",           DoubleType(),    True),
+    StructField("congestion_surcharge",   DoubleType(),    True),
+    StructField("Airport_fee",            DoubleType(),    True),
+    StructField("cbd_congestion_fee",     DoubleType(),    True),
 ])
 
 # ---------------------------------------------------------------------------
@@ -44,7 +47,7 @@ TAXI_SCHEMA = StructType([
 BRONZE_TABLE = "lakehouse.taxi.bronze"
 SILVER_TABLE = "lakehouse.taxi.silver"
 CHECKPOINT_DIR = "./checkpoints/silver"
-ZONE_LOOKUP_PATH = "data/taxi_zone_lookup.parquet"
+ZONE_LOOKUP_PATH = "/home/jovyan/project/data/taxi_zone_lookup.parquet"
 
 DEDUP_KEY = [
     "tpep_pickup_datetime",
@@ -145,10 +148,10 @@ def process_batch(batch_df, batch_id):
         F.from_json(F.col("raw_json"), TAXI_SCHEMA).alias("data")
     ).select("data.*")
 
-    # --- Cast columns ---
+    # --- Cast columns to target types ---
     df = df.select(
-        F.col("tpep_pickup_datetime").cast("timestamp").alias("tpep_pickup_datetime"),
-        F.col("tpep_dropoff_datetime").cast("timestamp").alias("tpep_dropoff_datetime"),
+        F.col("tpep_pickup_datetime"),
+        F.col("tpep_dropoff_datetime"),
         F.col("passenger_count").cast("int").alias("passenger_count"),
         F.col("trip_distance").cast("double").alias("trip_distance"),
         F.col("PULocationID").cast("int").alias("PULocationID"),

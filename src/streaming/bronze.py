@@ -11,7 +11,7 @@ import pyspark.sql.functions as F
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-KAFKA_BOOTSTRAP   = "kafka:29092"
+KAFKA_BOOTSTRAP   = "kafka:9092"
 KAFKA_TOPIC       = "taxi-trips"
 CHECKPOINT_DIR    = "./checkpoints/bronze"
 TABLE             = "lakehouse.taxi.bronze"
