@@ -184,12 +184,13 @@ def _exec_in_jupyter(script_path: str) -> None:
         )
 
 
-def run_bronze_cdc(**_)   -> None: _exec_in_jupyter("src/cdc/bronze_cdc.py")
-def run_bronze_taxi(**_)  -> None: _exec_in_jupyter("src/streaming/bronze.py")
-def run_silver_cdc(**_)   -> None: _exec_in_jupyter("src/cdc/silver_cdc.py")
-def run_silver_taxi(**_)  -> None: _exec_in_jupyter("src/streaming/silver.py")
-def run_gold_taxi(**_)    -> None: _exec_in_jupyter("src/streaming/gold.py")
-def run_validation(**_)   -> None: _exec_in_jupyter("src/cdc/validate.py")
+def run_bronze_cdc(**_)          -> None: _exec_in_jupyter("src/cdc/bronze_cdc.py")
+def run_bronze_taxi(**_)         -> None: _exec_in_jupyter("src/streaming/bronze.py")
+def run_silver_cdc(**_)          -> None: _exec_in_jupyter("src/cdc/silver_cdc.py")
+def run_silver_taxi(**_)         -> None: _exec_in_jupyter("src/streaming/silver.py")
+def run_gold_taxi(**_)           -> None: _exec_in_jupyter("src/streaming/gold.py")
+def run_gold_demand_patterns(**_)-> None: _exec_in_jupyter("src/gold_demand_patterns.py")
+def run_validation(**_)          -> None: _exec_in_jupyter("src/cdc/validate.py")
 
 
 def snapshot_pg(**context) -> dict:
@@ -312,6 +313,12 @@ with DAG(
         sla=timedelta(minutes=25),
     )
 
+    t_gold_demand = PythonOperator(
+        task_id="gold_demand_patterns",
+        python_callable=run_gold_demand_patterns,
+        sla=timedelta(minutes=27),
+    )
+
     t_validation = PythonOperator(
         task_id="validation",
         python_callable=run_validation,
@@ -319,16 +326,15 @@ with DAG(
         trigger_rule=TriggerRule.ALL_SUCCESS,
     )
 
-    # ── Dependency graph ────────────────────────────────────────────────────
+    # ── Dependency graph ─────────────────────────────────────────────────────────────
     #
     #   health_check ──► snapshot_pg ──► bronze_cdc  ──► silver_cdc ──┐
-    #                                └── bronze_taxi ──► silver_taxi ──┴──► gold_taxi ──► validation
+    #                                └── bronze_taxi ──► silver_taxi ──┼──► gold_taxi ──────────┐
+    #                                                                   └──► gold_demand_patterns ─┴──► validation
     #
-    # snapshot_pg runs first so the Postgres state it captures pre-dates
-    # bronze_cdc's Kafka read: any row deleted before the snapshot already
-    # has its delete event in Kafka and will be processed by silver_cdc.
     t_health_check >> t_snapshot_pg >> [t_bronze_cdc, t_bronze_taxi]
     t_bronze_cdc   >> t_silver_cdc
     t_bronze_taxi  >> t_silver_taxi
     [t_silver_cdc, t_silver_taxi] >> t_gold_taxi
-    t_gold_taxi    >> t_validation
+    [t_silver_cdc, t_silver_taxi] >> t_gold_demand
+    [t_gold_taxi, t_gold_demand]  >> t_validation
